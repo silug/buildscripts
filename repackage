@@ -1,0 +1,12 @@
+#!/bin/sh
+
+set -e
+
+TMPDIR=${TMPDIR:-/tmp}
+
+for file in "$@" ; do
+    pushd "$( mktemp -d "$TMPDIR"/"$( basename $0 )".XXXXXX )"
+    rpm2cpio "$file" | cpio -vid
+    mksrpm *.spec
+    popd
+done

@@ -1,0 +1,165 @@
+#!/usr/bin/perl
+#
+# $Id: bump,v 1.8 2008/04/19 16:47:59 steve Exp $
+
+use strict;
+use warnings;
+
+use File::Basename;
+use FileHandle;
+use DirHandle;
+use POSIX qw(strftime);
+use Getopt::Long;
+
+sub usage($) {
+    my $status=shift;
+    my $name=basename($0);
+
+    print STDERR <<END;
+Usage:
+    $name [options] [spec [spec [...]]]
+
+    Options:
+        --help          This message
+
+        --version       Specify version of package (default is current version)
+        --release       Specify release of package (default is current + 1 if
+                        no version is specified, 1 otherwise)
+        --epoch         Specify epoch of package (default is current epoch)
+
+    By default, *.spec in the current directory are updated.
+END
+
+    exit $status;
+}
+
+our $home=$ENV{'HOME'} || (getpwuid($<))[7];
+die "Can't locate home directory.  Please define \$HOME.\n"
+    if (!defined($home));
+
+our $pkgdetails="$home/.cpan/sources/modules/02packages.details.txt.gz";
+
+our $version;
+our $release;
+our $epoch;
+our $help=0;
+
+GetOptions(
+        'version=s'     => \$version,
+        'release=s'     => \$release,
+        'epoch=s'       => \$epoch,
+        'help'          => \$help,
+    ) or usage(1);
+
+usage(0) if $help;
+
+$release=1 if (defined($version) and !defined($release));
+
+my @files=@ARGV;
+
+if (!@files) {
+    my $dh=new DirHandle ".";
+    @files=grep /\.spec$/, $dh->read();
+
+    die "No spec file found or specified.\n" if (!@files);
+}
+
+for my $file (@files) {
+    my $tmp=".$file.tmp";
+
+    my $in=new FileHandle $file, "r" or die "open($file) failed: $!\n";
+    my $out=new FileHandle $tmp, "w" or die "open($tmp) failed: $!\n";
+
+    my ($v,$r);
+
+    my $e="";
+
+    my $reason;
+    if (defined($version)) {
+        $reason="- Update to $version.\n";
+    } else {
+        $reason="";
+    }
+
+    my $path="";
+
+    while (<$in>) {
+        if (/^Name:\s*perl-(\S+)/ and -e $pkgdetails) {
+            my $name=$1;
+            $name=~s/-/::/g;
+
+            eval {
+                use Parse::CPAN::Packages;
+
+                my $packages=Parse::CPAN::Packages->new($pkgdetails)
+                    or die "Parse::CPAN::Packages->new() failed: $!\n";
+                my ($m,$d);
+                if ($m=$packages->package($name) and $d=$m->distribution()) {
+                    $path=dirname($d->prefix());
+                }
+            };
+        } elsif (/^Release:/) {
+            if (defined($release)) {
+                s/^(Release:\s*)((?:(?:\d+\.)+)?)(\d+)/$1.$release/e;
+            } else {
+                s/^(Release:\s*)((?:(?:\d+\.)+)?)(\d+)/$1.$2.($3+1)/e;
+            }
+            $r=(/^Release:\s*(\S+)/)[0];
+            $r=~s/\%.*$//;
+        } elsif (/^Version:\s*(\S+)/) {
+            if (defined($version)) {
+                s/^(Version:\s*)(\S+)/$1$version/;
+                $v=$version;
+            } else {
+                $v=$1;
+            }
+        } elsif (/^Epoch:\s*(\S+)/) {
+            if (defined($epoch)) {
+                s/^(Epoch:\s*)(\S+)/$1$epoch/;
+                $e="$epoch:";
+            } else {
+                $e="$1:";
+            }
+        } elsif ($path and /^(Source\d*):/) {
+            my $source=$1;
+            if (s,/modules/by-module/[^/]+/,/authors/id/$path/,
+                or s/-[\d\.]+(\.(?:tar|tgz|zip))/-\%{version}$1/) {
+                $reason.="- Canonicalize $source URL.\n";
+            }
+        } elsif (/^License:\s+(.*)$/) {
+            my $license=$1;
+            $license=~s/\s+$//;
+            if ($license eq "GPL or Artistic" or $license eq "Artistic or GPL") {
+                s/$license/GPL+ or Artistic/;
+                $reason.="- Update License tag.\n";
+            } elsif ($license eq "GPL") {
+                s/$license/CHECK(GPLv2+)/;
+                $reason.="- Update License tag.  (FIXME - VERIFY!)\n";
+            }
+        } elsif (/^(find .*)( -type d)( -depth)\b(.*)$/) {
+            $_="$1$3$2$4\n";
+            $reason.="- Fix find option order.\n";
+        } elsif (s/^chmod\s+-R\s+(?:u\+rwX,go?\+rX(?:,go-w)?|u\+w)(?=\s+(?:\$RPM_BUILD_ROOT|\%\{buildroot\}))/\%{_fixperms}/) {
+            $reason.="- Use fixperms macro instead of our own chmod incantation.\n";
+        } elsif (s/^(\%check)\s*\|\|\s*:\s*$/$1/) {
+            $_.="\n";
+            $reason.="- Remove check macro cruft.\n";
+        } elsif (/^\%changelog$/i) {
+            $reason="- Rebuild.\n" if (!length($reason));
+            print $out $_;
+            print $out "* " . strftime("%a %b %d %Y", localtime())
+                . " Steven Pritchard <steve\@kspei.com> "
+                . $e . $v . "-" . $r . "\n$reason\n";
+            next;
+        }
+
+        print $out $_;
+    }
+
+    $in->close();
+    $out->close();
+
+    rename($tmp, $file) or die "rename($tmp,$file) failed: $!\n";
+}
+
+# vi: set ai et:
